@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -196,6 +197,33 @@
     box-shadow:0 6px 14px rgba(43,36,32,0.18);
   }
   .order-btn:active{transform:scale(0.98);}
+
+  .edit-price-link{
+    display:block; width:100%; text-align:center;
+    background:none; border:none; cursor:pointer;
+    margin-top:10px; padding:4px;
+    font-size:12px; color:var(--ink-soft); text-decoration:underline;
+  }
+
+  .price-edit-notice{
+    background:var(--paper-soft); border-radius:10px; padding:10px 12px;
+    font-size:12px; line-height:1.6; color:var(--ink-soft); margin-bottom:16px;
+  }
+  .price-edit-notice b{color:var(--gochujang);}
+  .pe-cat-title{
+    font-family:'Noto Serif KR'; font-weight:700; font-size:13.5px; color:var(--doenjang);
+    margin:14px 0 8px; display:flex; align-items:center; gap:6px;
+  }
+  .pe-cat-title:first-child{margin-top:0;}
+  .pe-cat-title .dot{width:7px;height:7px;border-radius:50%;background:var(--doenjang);}
+  .pe-row{
+    display:flex; align-items:center; justify-content:space-between; gap:10px;
+    padding:9px 0; border-bottom:1px solid var(--line);
+  }
+  .pe-row-name{font-size:14.5px; font-weight:600; flex:1;}
+  .pe-row input[type=number]{
+    width:110px; text-align:right; flex-shrink:0;
+  }
 
   /* ===== Today summary ===== */
   .summary-card{margin-top:16px;}
@@ -533,6 +561,26 @@
     <div class="menu-body" id="menuBody"></div>
     <div class="menu-footer">
       <button class="order-btn" id="openOrderBtn" type="button">🍱 주문하기</button>
+      <button class="edit-price-link" id="openPriceEditBtn" type="button">✏️ 이 식단표 가격만 수정하기</button>
+    </div>
+  </div>
+
+  <!-- 가격 수정 모달 -->
+  <div class="modal-overlay" id="priceEditModal">
+    <div class="modal-sheet">
+      <div class="modal-head">
+        <h2>✏️ 가격 수정</h2>
+        <button class="modal-close" id="closePriceEditBtn" type="button">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="price-edit-notice">
+          이미 들어온 주문의 금액은 그대로 유지돼요. 여기서 바꾸는 가격은 <b>이후 새로 들어오는 주문</b>부터 적용됩니다.
+        </div>
+        <div id="priceEditArea"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="primary-btn" id="savePriceEditBtn" type="button">가격 저장하기</button>
+      </div>
     </div>
   </div>
 
@@ -1173,6 +1221,83 @@ document.getElementById('openOrderBtn').addEventListener('click', ()=>{
   updateOrderTotal();
   openModal('orderModal');
   setTimeout(()=> document.getElementById('ordererName').focus(), 200);
+});
+
+/* =====================================================================
+   가격 수정 모달 — 이미 들어온 주문은 보존, 새 주문부터 새 가격 적용
+   ===================================================================== */
+let priceDraft = {}; // itemId -> price(string)
+
+document.getElementById('openPriceEditBtn').addEventListener('click', ()=>{
+  if(!todayMenu) return;
+  priceDraft = {};
+  todayMenu.items.forEach(it=> priceDraft[it.id] = String(it.price));
+  renderPriceEditArea();
+  openModal('priceEditModal');
+});
+document.getElementById('closePriceEditBtn').addEventListener('click', ()=> closeModal('priceEditModal'));
+
+function renderPriceEditArea(){
+  const area = document.getElementById('priceEditArea');
+  area.innerHTML = '';
+  CATS.forEach(cat=>{
+    const items = todayMenu.items.filter(it=> it.cat===cat);
+    if(items.length===0) return;
+    const title = document.createElement('div');
+    title.className = 'pe-cat-title';
+    title.innerHTML = `<span class="dot"></span>${cat}`;
+    area.appendChild(title);
+    items.forEach(it=>{
+      const row = document.createElement('div');
+      row.className = 'pe-row';
+      row.innerHTML = `
+        <span class="pe-row-name">${escapeHtml(it.name)}</span>
+        <input type="number" inputmode="numeric" min="0" step="100" value="${priceDraft[it.id]}" data-id="${it.id}">
+      `;
+      area.appendChild(row);
+    });
+  });
+  area.querySelectorAll('input').forEach(inp=>{
+    inp.addEventListener('input', (e)=>{
+      priceDraft[e.target.dataset.id] = e.target.value;
+    });
+  });
+}
+
+document.getElementById('savePriceEditBtn').addEventListener('click', async ()=>{
+  if(!todayMenu) return;
+  const newItems = todayMenu.items.map(it=>{
+    const raw = parseInt(priceDraft[it.id], 10);
+    const price = (!isNaN(raw) && raw >= 0) ? raw : it.price;
+    return { ...it, price };
+  });
+
+  const btn = document.getElementById('savePriceEditBtn');
+  btn.disabled = true; btn.textContent = '저장 중...';
+
+  try{
+    if(sbReady){
+      const { error } = await supabaseClient
+        .from('menus')
+        .update({ items: newItems })
+        .eq('menu_date', todayMenu.menu_date);
+      if(error) throw error;
+      // 주의: orders 테이블은 절대 건드리지 않음 — 이미 들어온 주문 금액은 그대로 보존됨
+    }
+  }catch(e){
+    logError('savePriceEditBtn error', e);
+    showToast('가격 저장 중 오류: ' + describeError(e) + ' (로컬에만 반영됩니다)');
+  }
+
+  const updatedMenu = { ...todayMenu, items: newItems };
+  todayMenu = updatedMenu;
+  allMenusCache[todayMenu.menu_date] = updatedMenu;
+  persistLocal();
+
+  btn.disabled = false; btn.textContent = '가격 저장하기';
+  closeModal('priceEditModal');
+  renderMainScreen();
+  showToast('가격이 수정되었어요. 기존 주문 금액은 그대로 보존돼요 ✅');
 });
 
 function openOrderModalForEdit(orderId){
