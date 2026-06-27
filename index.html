@@ -561,7 +561,7 @@
     <div class="menu-body" id="menuBody"></div>
     <div class="menu-footer">
       <button class="order-btn" id="openOrderBtn" type="button">🍱 주문하기</button>
-      <button class="edit-price-link" id="openPriceEditBtn" type="button">✏️ 이 식단표 가격만 수정하기</button>
+      <button class="edit-price-link" id="openPriceEditBtn" type="button">✏️ 식단표 수정하기</button>
     </div>
   </div>
 
@@ -611,7 +611,7 @@
 <div class="modal-overlay" id="adminModal">
   <div class="modal-sheet">
     <div class="modal-head">
-      <h2>오늘의 반찬 입력하기</h2>
+      <h2 id="adminModalTitle">오늘의 반찬 입력하기</h2>
       <button class="modal-close" id="closeAdminBtn" type="button">✕</button>
     </div>
     <div class="modal-body">
@@ -955,7 +955,10 @@ document.getElementById('openAdminBtn').addEventListener('click', ()=>{
   renderDraftPools();
   openModal('adminModal');
 });
-document.getElementById('closeAdminBtn').addEventListener('click', ()=> closeModal('adminModal'));
+document.getElementById('closeAdminBtn').addEventListener('click', ()=>{
+  document.getElementById('adminModalTitle').textContent = '오늘의 반찬 입력하기';
+  closeModal('adminModal');
+});
 
 document.querySelectorAll('.cat-tab').forEach(tab=>{
   tab.addEventListener('click', ()=>{
@@ -1022,7 +1025,9 @@ document.getElementById('publishBtn').addEventListener('click', async ()=>{
       const name = (row.name||'').trim();
       const price = parseInt(row.price,10);
       if(name && !isNaN(price) && price>=0){
-        items.push({ id: 'item_'+seq++, cat, name, price });
+        // 수정 모드: originalId 유지 → 기존 주문과 연결 보존
+        const itemId = row.originalId || 'item_'+seq++;
+        items.push({ id: itemId, cat, name, price });
       }
     });
   });
@@ -1034,8 +1039,11 @@ document.getElementById('publishBtn').addEventListener('click', async ()=>{
   const notice = document.getElementById('noticeInput').value.trim();
   const menuObj = { menu_date: menuDate, notice, items };
 
+  // 저장 전에 판별해야 정확 (캐시 덮어쓰기 전)
+  const isEditMode = !!(allMenusCache[menuDate]);
+
   const btn = document.getElementById('publishBtn');
-  btn.disabled = true; btn.textContent = '발행 중...';
+  btn.disabled = true; btn.textContent = isEditMode ? '저장 중...' : '발행 중...';
 
   try{
     if(sbReady){
@@ -1043,24 +1051,26 @@ document.getElementById('publishBtn').addEventListener('click', async ()=>{
         .from('menus')
         .upsert({ menu_date: menuDate, notice, items }, { onConflict:'menu_date' });
       if(error) throw error;
-      // 새 식단표가 올라오면 해당 날짜의 기존 주문은 비움(요청사항: 새 식단표=새 주문내역)
-      await supabaseClient.from('orders').delete().eq('menu_date', menuDate);
+      // 신규 발행일 때만 주문 초기화, 수정 모드에서는 주문 보존
+      if(!isEditMode){
+        await supabaseClient.from('orders').delete().eq('menu_date', menuDate);
+      }
     }
   }catch(e){
     logError('publishBtn error', e);
     showToast('저장 중 오류: ' + describeError(e) + ' (로컬에만 저장됩니다)');
   }
   todayMenu = menuObj;
-  todayOrders = [];
+  if(!isEditMode){ todayOrders = []; allOrdersCache[menuDate] = []; }
   allMenusCache[menuDate] = menuObj;
-  allOrdersCache[menuDate] = [];
   viewingDate = menuDate;
   persistLocal();
 
-  btn.disabled = false; btn.textContent = '발행하기';
+  btn.disabled = false; btn.textContent = isEditMode ? '수정 저장하기' : '발행하기';
   closeModal('adminModal');
+  document.getElementById('adminModalTitle').textContent = '오늘의 반찬 입력하기';
   renderMainScreen();
-  showToast('오늘의 식단표가 발행되었어요 🎉');
+  showToast(isEditMode ? '식단표가 수정되었어요. 기존 주문은 그대로 유지됩니다 ✅' : '오늘의 식단표가 발행되었어요 🎉');
 });
 
 /* =====================================================================
@@ -1230,10 +1240,24 @@ let priceDraft = {}; // itemId -> price(string)
 
 document.getElementById('openPriceEditBtn').addEventListener('click', ()=>{
   if(!todayMenu) return;
-  priceDraft = {};
-  todayMenu.items.forEach(it=> priceDraft[it.id] = String(it.price));
-  renderPriceEditArea();
-  openModal('priceEditModal');
+  // 기존 메뉴 데이터를 draft에 채워서 수정 모드로 관리자 모달 열기
+  const [y,m,d] = todayMenu.menu_date.split('-').map(Number);
+  pickedDate = new Date(y, m-1, d);
+  document.getElementById('dateDisplayText').textContent = dateStrToLabel(toDateStr(pickedDate));
+  document.getElementById('calendarPop').classList.remove('show');
+  menuDraft = { '반찬':[], '메인메뉴':[], '국':[] };
+  itemSeq = 1;
+  todayMenu.items.forEach(it=>{
+    menuDraft[it.cat].push({ id:'d'+(itemSeq++), originalId: it.id, name: it.name, price: String(it.price) });
+  });
+  CATS.forEach(c=>{ if(menuDraft[c].length===0) menuDraft[c].push({ id:'d'+(itemSeq++), name:'', price:'' }); });
+  document.getElementById('noticeInput').value = todayMenu.notice || '';
+  document.getElementById('adminModalTitle').textContent = '식단표 수정하기';
+  activeCatTab = '반찬';
+  document.querySelectorAll('.cat-tab').forEach(t=> t.classList.toggle('active', t.dataset.cat==='반찬'));
+  document.querySelectorAll('.cat-pool').forEach(p=> p.style.display = (p.dataset.cat==='반찬') ? '' : 'none');
+  renderDraftPools();
+  openModal('adminModal');
 });
 document.getElementById('closePriceEditBtn').addEventListener('click', ()=> closeModal('priceEditModal'));
 
@@ -1462,7 +1486,7 @@ document.getElementById('confirmOrderBtn').addEventListener('click', async ()=>{
     allOrdersCache[todayMenu.menu_date] = todayOrders;
     persistLocal();
 
-    btn.disabled = false;
+    btn.disabled = false; btn.textContent = '확인';
     closeModal('orderModal');
     renderSummary();
     showToast(`${name}님의 주문이 등록되었어요 🙌`);
